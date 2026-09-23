@@ -6,6 +6,7 @@
 - 「＋ 新規登録」から専用ダイアログで登録（メニュー名／複数行コマンド／PowerShell or cmd／引数最大3件）
 - 引数欄に説明を入力して「挿入」を押すと、コマンド欄のカーソル位置に {ARG1}〜{ARG3} が挿入される
 - 実行時、コマンドにプレースホルダーが含まれていれば、その場で値の入力を求めてから実行する
+- 実行オプション: 作業フォルダ指定／「---」区切りでの別ウィンドウ並列起動／ウィンドウなしバックグラウンド実行
 
 必要ライブラリ: pystray, pillow (pip install pystray pillow)
 Windows専用（cmd.exe / powershell.exe / CREATE_NEW_CONSOLE を利用）
@@ -61,8 +62,14 @@ def save_commands(commands):
 # ---------------------------------------------------------------------------
 
 
-def run_in_shell(command_text, shell):
-    """一時スクリプトを作成し、新規コンソールで実行する。"""
+def run_in_shell(command_text, shell, cwd=None, background=False):
+    """一時スクリプトを作成して実行する。
+
+    cwd: 作業フォルダ（空なら BASE_DIR）。
+    background=False: 新規コンソールを開き、終了後も結果を残す（従来動作）。
+    background=True: ウィンドウを作らず裏で実行する（サーバー常駐向け）。
+    """
+    workdir = cwd.strip() if isinstance(cwd, str) and cwd.strip() else BASE_DIR
     try:
         if shell == "powershell":
             fd, path = tempfile.mkstemp(suffix=".ps1")
@@ -70,16 +77,31 @@ def run_in_shell(command_text, shell):
             # BOM付きUTF-8にしておくとPowerShellが日本語を正しく解釈しやすい
             with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
                 f.write(command_text + "\r\n")
-                f.write("Write-Host ''\r\nWrite-Host '--- 実行終了 ---'\r\n")
-            args = [
-                "powershell.exe",
-                "-NoLogo",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-NoExit",
-                "-File",
-                path,
-            ]
+                if not background:
+                    f.write("Write-Host ''\r\nWrite-Host '--- 実行終了 ---'\r\n")
+            if background:
+                args = [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path,
+                ]
+                flags = subprocess.CREATE_NO_WINDOW
+            else:
+                args = [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-NoExit",
+                    "-File",
+                    path,
+                ]
+                flags = subprocess.CREATE_NEW_CONSOLE
         else:
             fd, path = tempfile.mkstemp(suffix=".bat")
             os.close(fd)
@@ -87,16 +109,30 @@ def run_in_shell(command_text, shell):
                 f.write("@echo off\r\n")
                 f.write("chcp 65001 >nul\r\n")
                 f.write(command_text + "\r\n")
-                f.write("echo.\r\necho --- 実行終了 ---\r\npause >nul\r\n")
-            args = ["cmd.exe", "/k", path]
+                if not background:
+                    f.write("echo.\r\necho --- 実行終了 ---\r\npause >nul\r\n")
+            if background:
+                args = ["cmd.exe", "/c", path]
+                flags = subprocess.CREATE_NO_WINDOW
+            else:
+                args = ["cmd.exe", "/k", path]
+                flags = subprocess.CREATE_NEW_CONSOLE
 
         subprocess.Popen(
             args,
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-            cwd=BASE_DIR,
+            creationflags=flags,
+            cwd=workdir,
         )
     except Exception as e:
         messagebox.showerror("実行エラー", str(e))
+
+
+def split_blocks(command_text):
+    """`---` のみの行を区切りとしてコマンドを分割する。区切りがなければ全体を1件として返す。"""
+    parts = re.split(r"^[ \t]*---[ \t]*$", command_text, flags=re.MULTILINE)
+    blocks = [p.strip() for p in parts]
+    blocks = [b for b in blocks if b]
+    return blocks if blocks else [command_text]
 
 
 def used_placeholders(command_text):
@@ -116,7 +152,15 @@ def execute_command(cmd_data):
         final_command = cmd_data["command"]
         for ph in placeholders:
             final_command = final_command.replace(ph, values.get(ph, ""))
-        run_in_shell(final_command, cmd_data["shell"])
+        workdir = cmd_data.get("cwd", "") or BASE_DIR
+        background = bool(cmd_data.get("background", False))
+        if cmd_data.get("parallel", False):
+            blocks = split_blocks(final_command)
+            if len(blocks) > 1:
+                for block in blocks:
+                    run_in_shell(block, cmd_data["shell"], cwd=workdir, background=background)
+                return
+        run_in_shell(final_command, cmd_data["shell"], cwd=workdir, background=background)
 
     root.after(0, _run)
 
@@ -185,7 +229,7 @@ def ask_arguments(cmd_data, placeholders):
 def open_register_dialog(edit_data=None):
     dialog = tk.Toplevel(root)
     dialog.title("コマンド編集" if edit_data else "新規コマンド登録")
-    dialog.geometry("560x520")
+    dialog.geometry("560x660")
     dialog.grab_set()
 
     tk.Label(dialog, text="メニュー名:").pack(anchor="w", padx=12, pady=(12, 0))
@@ -231,6 +275,26 @@ def open_register_dialog(edit_data=None):
         tk.Button(row, text="コマンドに挿入", command=make_insert()).pack(side="left")
         arg_entries.append(entry)
 
+    opts_frame = tk.LabelFrame(dialog, text="実行オプション")
+    opts_frame.pack(padx=12, pady=(0, 10), fill="x")
+
+    cwd_row = tk.Frame(opts_frame)
+    cwd_row.pack(fill="x", padx=6, pady=(6, 2))
+    tk.Label(cwd_row, text="作業フォルダ:", width=10, anchor="w").pack(side="left")
+    cwd_entry = tk.Entry(cwd_row, width=40)
+    cwd_entry.pack(side="left", padx=5, fill="x", expand=True)
+    tk.Label(opts_frame, text="※空欄ならランチャーと同じフォルダ。npm run 等は package.json のあるフォルダを指定。",
+             anchor="w", fg="gray").pack(anchor="w", padx=6)
+
+    parallel_var = tk.BooleanVar(value=False)
+    background_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(opts_frame, text="「---」のみの行で分割し、別ウィンドウで並列起動する",
+                   variable=parallel_var).pack(anchor="w", padx=6, pady=(4, 0))
+    tk.Checkbutton(opts_frame, text="ウィンドウを表示せずバックグラウンドで実行する",
+                   variable=background_var).pack(anchor="w", padx=6)
+    tk.Label(opts_frame, text="例: 1ブロック目に npm run obsidian-bridge ／ 2ブロック目に n8n start を書き、間に --- の行を挟む",
+             anchor="w", justify="left", fg="gray").pack(anchor="w", padx=6, pady=(0, 6))
+
     if edit_data:
         name_entry.insert(0, edit_data["name"])
         command_text.insert("1.0", edit_data["command"])
@@ -239,6 +303,10 @@ def open_register_dialog(edit_data=None):
         for i in range(3):
             if i < len(existing_args) and existing_args[i]:
                 arg_entries[i].insert(0, existing_args[i])
+        if edit_data.get("cwd"):
+            cwd_entry.insert(0, edit_data["cwd"])
+        parallel_var.set(bool(edit_data.get("parallel", False)))
+        background_var.set(bool(edit_data.get("background", False)))
 
     def on_save():
         name = name_entry.get().strip()
@@ -248,12 +316,16 @@ def open_register_dialog(edit_data=None):
             return
 
         args = [e.get().strip() for e in arg_entries]
+        cwd_value = cwd_entry.get().strip()
+        parallel_value = bool(parallel_var.get())
+        background_value = bool(background_var.get())
         commands = load_commands()
 
         if edit_data:
             for c in commands:
                 if c["id"] == edit_data["id"]:
-                    c.update({"name": name, "command": cmd, "shell": shell_var.get(), "args": args})
+                    c.update({"name": name, "command": cmd, "shell": shell_var.get(), "args": args,
+                              "cwd": cwd_value, "parallel": parallel_value, "background": background_value})
                     break
         else:
             commands.append(
@@ -263,6 +335,9 @@ def open_register_dialog(edit_data=None):
                     "command": cmd,
                     "shell": shell_var.get(),
                     "args": args,
+                    "cwd": cwd_value,
+                    "parallel": parallel_value,
+                    "background": background_value,
                 }
             )
 
