@@ -371,6 +371,28 @@ def open_manage_dialog():
     for c in commands:
         listbox.insert("end", f"{c['name']}  [{c['shell']}]")
 
+    def refresh_list(select=None):
+        listbox.delete(0, "end")
+        for c in commands:
+            listbox.insert("end", f"{c['name']}  [{c['shell']}]")
+        if select is not None:
+            listbox.selection_set(select)
+            listbox.see(select)
+
+    def on_move(delta):
+        sel = listbox.curselection()
+        if not sel:
+            messagebox.showinfo("選択なし", "移動するコマンドを選択してください。", parent=dialog)
+            return
+        idx = sel[0]
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(commands):
+            return  # 先頭・末尾では何もしない
+        commands[idx], commands[new_idx] = commands[new_idx], commands[idx]
+        save_commands(commands)
+        rebuild_menu()
+        refresh_list(select=new_idx)
+
     def on_edit():
         sel = listbox.curselection()
         if not sel:
@@ -394,9 +416,11 @@ def open_manage_dialog():
 
     btn_frame = tk.Frame(dialog)
     btn_frame.pack(pady=10)
-    tk.Button(btn_frame, text="編集", width=10, command=on_edit).pack(side="left", padx=5)
-    tk.Button(btn_frame, text="削除", width=10, command=on_delete).pack(side="left", padx=5)
-    tk.Button(btn_frame, text="閉じる", width=10, command=dialog.destroy).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="編集", width=8, command=on_edit).pack(side="left", padx=3)
+    tk.Button(btn_frame, text="▲ 上へ", width=8, command=lambda: on_move(-1)).pack(side="left", padx=3)
+    tk.Button(btn_frame, text="▼ 下へ", width=8, command=lambda: on_move(1)).pack(side="left", padx=3)
+    tk.Button(btn_frame, text="削除", width=8, command=on_delete).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="閉じる", width=8, command=dialog.destroy).pack(side="left", padx=5)
 
 
 # ---------------------------------------------------------------------------
