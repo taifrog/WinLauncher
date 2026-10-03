@@ -288,10 +288,13 @@ def open_register_dialog(edit_data=None):
 
     parallel_var = tk.BooleanVar(value=False)
     background_var = tk.BooleanVar(value=False)
+    run_at_startup_var = tk.BooleanVar(value=False)
     tk.Checkbutton(opts_frame, text="「---」のみの行で分割し、別ウィンドウで並列起動する",
                    variable=parallel_var).pack(anchor="w", padx=6, pady=(4, 0))
     tk.Checkbutton(opts_frame, text="ウィンドウを表示せずバックグラウンドで実行する",
                    variable=background_var).pack(anchor="w", padx=6)
+    tk.Checkbutton(opts_frame, text="起動時に実行する",
+                   variable=run_at_startup_var).pack(anchor="w", padx=6)
     tk.Label(opts_frame, text="例: 1ブロック目に npm run obsidian-bridge ／ 2ブロック目に n8n start を書き、間に --- の行を挟む",
              anchor="w", justify="left", fg="gray").pack(anchor="w", padx=6, pady=(0, 6))
 
@@ -307,6 +310,7 @@ def open_register_dialog(edit_data=None):
             cwd_entry.insert(0, edit_data["cwd"])
         parallel_var.set(bool(edit_data.get("parallel", False)))
         background_var.set(bool(edit_data.get("background", False)))
+        run_at_startup_var.set(bool(edit_data.get("run_at_startup", False)))
 
     def on_save():
         name = name_entry.get().strip()
@@ -319,13 +323,15 @@ def open_register_dialog(edit_data=None):
         cwd_value = cwd_entry.get().strip()
         parallel_value = bool(parallel_var.get())
         background_value = bool(background_var.get())
+        run_at_startup_value = bool(run_at_startup_var.get())
         commands = load_commands()
 
         if edit_data:
             for c in commands:
                 if c["id"] == edit_data["id"]:
                     c.update({"name": name, "command": cmd, "shell": shell_var.get(), "args": args,
-                              "cwd": cwd_value, "parallel": parallel_value, "background": background_value})
+                              "cwd": cwd_value, "parallel": parallel_value, "background": background_value,
+                              "run_at_startup": run_at_startup_value})
                     break
         else:
             commands.append(
@@ -338,6 +344,7 @@ def open_register_dialog(edit_data=None):
                     "cwd": cwd_value,
                     "parallel": parallel_value,
                     "background": background_value,
+                    "run_at_startup": run_at_startup_value,
                 }
             )
 
@@ -369,12 +376,14 @@ def open_manage_dialog():
 
     commands = load_commands()
     for c in commands:
-        listbox.insert("end", f"{c['name']}  [{c['shell']}]")
+        marker = " ★" if c.get("run_at_startup", False) else ""
+        listbox.insert("end", f"{c['name']}  [{c['shell']}]" + marker)
 
     def refresh_list(select=None):
         listbox.delete(0, "end")
         for c in commands:
-            listbox.insert("end", f"{c['name']}  [{c['shell']}]")
+            marker = " ★" if c.get("run_at_startup", False) else ""
+            listbox.insert("end", f"{c['name']}  [{c['shell']}]" + marker)
         if select is not None:
             listbox.selection_set(select)
             listbox.see(select)
@@ -465,6 +474,34 @@ def on_quit(icon, item):
     root.after(0, root.quit)
 
 
+# ---------------------------------------------------------------------------
+# 起動時自動実行
+# ---------------------------------------------------------------------------
+
+
+def run_startup_commands() -> None:
+    """起動時に実行フラグONのコマンドをメニュー表示順に自動実行する。
+
+    {ARG} プレースホルダーを含むコマンドは対話が必要なためスキップする。
+    1件の失敗で他を止めないよう、各実行は既存 execute_command 経路に委譲する。
+    """
+    try:
+        commands = load_commands()
+    except Exception:
+        return
+    for cmd_data in commands:
+        try:
+            if not cmd_data.get("run_at_startup", False):
+                continue
+            if not cmd_data.get("command", "").strip():
+                continue
+            if used_placeholders(cmd_data.get("command", "")):
+                continue
+            execute_command(cmd_data)
+        except Exception:
+            continue
+
+
 def create_image():
     """トレイ用アイコンを描画で生成する。"""
     size = 64
@@ -491,4 +528,5 @@ def start_tray():
 
 if __name__ == "__main__":
     threading.Thread(target=start_tray, daemon=True).start()
+    root.after(1000, run_startup_commands)
     root.mainloop()
