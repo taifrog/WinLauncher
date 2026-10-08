@@ -5,7 +5,9 @@
 - クリックで登録済みコマンドの一覧を表示、選択して実行
 - 「＋ 新規登録」から専用ダイアログで登録（メニュー名／複数行コマンド／PowerShell or cmd／引数最大3件）
 - 引数欄に説明を入力して「挿入」を押すと、コマンド欄のカーソル位置に {ARG1}〜{ARG3} が挿入される
+- 「FILE挿入」を押すと、コマンド欄のカーソル位置に {FILE1}〜{FILE3} が挿入される
 - 実行時、コマンドにプレースホルダーが含まれていれば、その場で値の入力を求めてから実行する
+- {FILE} が含まれていれば、ファイル・フォルダ選択ダイアログでパスを選んでから実行する
 - 実行オプション: 作業フォルダ指定／「---」区切りでの別ウィンドウ並列起動／ウィンドウなしバックグラウンド実行
 
 必要ライブラリ: pystray, pillow (pip install pystray pillow)
@@ -23,6 +25,7 @@ import uuid
 from typing import Optional
 
 import tkinter as tk
+from tkinter import filedialog
 from tkinter import messagebox
 
 import pystray
@@ -37,6 +40,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CONFIG_PATH = os.path.join(BASE_DIR, "commands.json")
 
 PLACEHOLDERS = ["{ARG1}", "{ARG2}", "{ARG3}"]
+FILE_PLACEHOLDERS = ["{FILE1}", "{FILE2}", "{FILE3}"]
 
 # ---------------------------------------------------------------------------
 # 設定ファイルの読み書き
@@ -167,11 +171,16 @@ def used_placeholders(command_text):
     return [p for p in PLACEHOLDERS if p in command_text]
 
 
+def used_file_placeholders(command_text: str) -> list:
+    """コマンド文中の {FILEn} プレースホルダーを検出する。"""
+    return [p for p in FILE_PLACEHOLDERS if p in command_text]
+
+
 def execute_command(cmd_data):
     """tray側スレッドから呼ばれるので、必ずrootのメインスレッドで処理する。"""
 
     def _run():
-        placeholders = used_placeholders(cmd_data["command"])
+        placeholders = used_placeholders(cmd_data["command"]) + used_file_placeholders(cmd_data["command"])
         values = {}
         if placeholders:
             values = ask_arguments(cmd_data, placeholders)
@@ -202,6 +211,74 @@ def execute_command(cmd_data):
 # ---------------------------------------------------------------------------
 
 
+def ask_file_or_directory(parent: tk.Toplevel) -> Optional[str]:
+    """ファイル・フォルダの種別選択ダイアログ。
+
+    Args:
+        parent: 親ウィンドウ。
+
+    Returns:
+        "file" / "directory" / None（キャンセル時）。
+    """
+    choice = {"value": None}
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("選択種別")
+    dialog.resizable(False, False)
+    dialog.transient(parent)
+    dialog.grab_set()
+
+    tk.Label(dialog, text="選択する種類を選んでください").pack(padx=16, pady=(12, 8))
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(pady=(0, 12))
+
+    def _choose(value):
+        choice["value"] = value
+        dialog.destroy()
+
+    tk.Button(btn_frame, text="ファイル", width=10, command=lambda: _choose("file")).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="フォルダ", width=10, command=lambda: _choose("directory")).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="キャンセル", width=10, command=dialog.destroy).pack(side="left", padx=5)
+
+    dialog.bind("<Escape>", lambda event: dialog.destroy())
+
+    dialog.update_idletasks()
+    dialog.geometry(f"+{parent.winfo_rootx() + 80}+{parent.winfo_rooty() + 60}")
+
+    dialog.wait_window()
+    return choice["value"]
+
+
+def ask_path_by_type(parent: tk.Toplevel, current: str) -> str:
+    """参照ボタン処理。種別選択→ダイアログ→選択パスを返す。
+
+    Args:
+        parent: 親ウィンドウ。
+        current: 既存の選択値（初期フォルダの決定に使う）。
+
+    Returns:
+        選択されたフルパス。キャンセル・失敗時は空文字。
+    """
+    kind = ask_file_or_directory(parent)
+    if kind is None:
+        return ""
+    initial = None
+    if current and os.path.exists(current):
+        initial = current if os.path.isdir(current) else os.path.dirname(current)
+    try:
+        if kind == "directory":
+            if initial:
+                return filedialog.askdirectory(parent=parent, initialdir=initial) or ""
+            return filedialog.askdirectory(parent=parent) or ""
+        if initial:
+            return filedialog.askopenfilename(parent=parent, initialdir=initial) or ""
+        return filedialog.askopenfilename(parent=parent) or ""
+    except Exception as e:
+        messagebox.showerror("選択エラー", str(e), parent=parent)
+        return ""
+
+
 def ask_arguments(cmd_data, placeholders):
     result = {}
     cancelled = {"flag": True}
@@ -212,23 +289,49 @@ def ask_arguments(cmd_data, placeholders):
     dialog.grab_set()
 
     entries = {}
+    path_vars = {}
     arg_labels = cmd_data.get("args", ["", "", ""])
+    first_focus = None
     for ph in placeholders:
-        idx = PLACEHOLDERS.index(ph)
+        if ph in FILE_PLACEHOLDERS:
+            idx = FILE_PLACEHOLDERS.index(ph)
+        else:
+            idx = PLACEHOLDERS.index(ph)
         label_text = arg_labels[idx] if idx < len(arg_labels) and arg_labels[idx] else f"引数{idx + 1}"
         row = tk.Frame(dialog)
         row.pack(fill="x", padx=12, pady=6)
         tk.Label(row, text=label_text, width=18, anchor="w").pack(side="left")
-        entry = tk.Entry(row, width=35)
-        entry.pack(side="left", padx=(4, 0))
-        entries[ph] = entry
+        if ph in FILE_PLACEHOLDERS:
+            # ファイル・フォルダ選択引数：表示欄＋参照ボタン（手入力なし）
+            var = tk.StringVar(value="")
+            path_vars[ph] = var
+            disp = tk.Entry(row, width=28, textvariable=var, state="disabled")
+            disp.pack(side="left", padx=(4, 0))
 
-    if entries:
-        list(entries.values())[0].focus_set()
+            def make_browse(target_ph=ph, target_var=var):
+                def _browse():
+                    chosen = ask_path_by_type(dialog, target_var.get())
+                    if chosen:
+                        target_var.set(chosen)
+
+                return _browse
+
+            tk.Button(row, text="参照...", width=8, command=make_browse()).pack(side="left", padx=(4, 0))
+        else:
+            entry = tk.Entry(row, width=35)
+            entry.pack(side="left", padx=(4, 0))
+            entries[ph] = entry
+            if first_focus is None:
+                first_focus = entry
+
+    if first_focus is not None:
+        first_focus.focus_set()
 
     def on_ok(event=None):
         for ph, e in entries.items():
             result[ph] = e.get()
+        for ph, var in path_vars.items():
+            result[ph] = var.get()
         cancelled["flag"] = False
         dialog.destroy()
 
@@ -268,7 +371,7 @@ def open_register_dialog(edit_data=None):
     name_entry = tk.Entry(dialog, width=60)
     name_entry.pack(padx=12, fill="x")
 
-    tk.Label(dialog, text="実行コマンド（複数行可。引数を使う場所に {ARG1} 等を挿入）:").pack(
+    tk.Label(dialog, text="実行コマンド（複数行可。引数を使う場所に {ARG1}・{FILE1} 等を挿入）:").pack(
         anchor="w", padx=12, pady=(10, 0)
     )
     text_frame = tk.Frame(dialog)
@@ -294,7 +397,7 @@ def open_register_dialog(edit_data=None):
         row = tk.Frame(args_frame)
         row.pack(fill="x", pady=3, padx=6)
         tk.Label(row, text=f"引数{i + 1} 説明:", width=10, anchor="w").pack(side="left")
-        entry = tk.Entry(row, width=28)
+        entry = tk.Entry(row, width=20)
         entry.pack(side="left", padx=5)
 
         def make_insert(idx=i):
@@ -304,7 +407,15 @@ def open_register_dialog(edit_data=None):
 
             return _insert
 
+        def make_file_insert(idx=i):
+            def _insert():
+                command_text.insert(tk.INSERT, FILE_PLACEHOLDERS[idx])
+                command_text.focus_set()
+
+            return _insert
+
         tk.Button(row, text="コマンドに挿入", command=make_insert()).pack(side="left")
+        tk.Button(row, text="FILE挿入", command=make_file_insert()).pack(side="left", padx=(4, 0))
         arg_entries.append(entry)
 
     opts_frame = tk.LabelFrame(dialog, text="実行オプション")
@@ -543,6 +654,8 @@ def run_startup_commands() -> None:
             if not cmd_data.get("command", "").strip():
                 continue
             if used_placeholders(cmd_data.get("command", "")):
+                continue
+            if used_file_placeholders(cmd_data.get("command", "")):
                 continue
             execute_command(cmd_data)
         except Exception:
