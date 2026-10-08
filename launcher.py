@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from typing import Optional
 
 import tkinter as tk
 from tkinter import messagebox
@@ -62,12 +63,24 @@ def save_commands(commands):
 # ---------------------------------------------------------------------------
 
 
-def run_in_shell(command_text, shell, cwd=None, background=False):
+def run_in_shell(
+    command_text: str,
+    shell: str,
+    cwd: Optional[str] = None,
+    background: bool = False,
+    auto_close: bool = False,
+) -> None:
     """一時スクリプトを作成して実行する。
 
-    cwd: 作業フォルダ（空なら BASE_DIR）。
-    background=False: 新規コンソールを開き、終了後も結果を残す（従来動作）。
-    background=True: ウィンドウを作らず裏で実行する（サーバー常駐向け）。
+    Args:
+        command_text: 実行するコマンド本文。
+        shell: "powershell" または "cmd"。
+        cwd: 作業フォルダ（空なら BASE_DIR）。
+        background: Trueならウィンドウを作らず裏で実行する（サーバー常駐向け）。
+            True時は auto_close に関わらずウィンドウを出さない。
+        auto_close: Trueなら実行完了後にウィンドウを自動で閉じる。
+            Falseなら新規コンソールを開き、終了後も結果を残す（従来動作）。
+            欠損の既存コマンドは False 扱い（従来通り残す）。
     """
     workdir = cwd.strip() if isinstance(cwd, str) and cwd.strip() else BASE_DIR
     try:
@@ -77,7 +90,7 @@ def run_in_shell(command_text, shell, cwd=None, background=False):
             # BOM付きUTF-8にしておくとPowerShellが日本語を正しく解釈しやすい
             with open(path, "w", encoding="utf-8-sig", newline="\r\n") as f:
                 f.write(command_text + "\r\n")
-                if not background:
+                if not background and not auto_close:
                     f.write("Write-Host ''\r\nWrite-Host '--- 実行終了 ---'\r\n")
             if background:
                 args = [
@@ -91,6 +104,17 @@ def run_in_shell(command_text, shell, cwd=None, background=False):
                     path,
                 ]
                 flags = subprocess.CREATE_NO_WINDOW
+            elif auto_close:
+                # 実行完了後にウィンドウを自動で閉じる（-NoExit を付けない）
+                args = [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    path,
+                ]
+                flags = subprocess.CREATE_NEW_CONSOLE
             else:
                 args = [
                     "powershell.exe",
@@ -109,11 +133,15 @@ def run_in_shell(command_text, shell, cwd=None, background=False):
                 f.write("@echo off\r\n")
                 f.write("chcp 65001 >nul\r\n")
                 f.write(command_text + "\r\n")
-                if not background:
+                if not background and not auto_close:
                     f.write("echo.\r\necho --- 実行終了 ---\r\npause >nul\r\n")
             if background:
                 args = ["cmd.exe", "/c", path]
                 flags = subprocess.CREATE_NO_WINDOW
+            elif auto_close:
+                # 実行完了後にウィンドウを自動で閉じる（/k ではなく /c）
+                args = ["cmd.exe", "/c", path]
+                flags = subprocess.CREATE_NEW_CONSOLE
             else:
                 args = ["cmd.exe", "/k", path]
                 flags = subprocess.CREATE_NEW_CONSOLE
@@ -154,13 +182,17 @@ def execute_command(cmd_data):
             final_command = final_command.replace(ph, values.get(ph, ""))
         workdir = cmd_data.get("cwd", "") or BASE_DIR
         background = bool(cmd_data.get("background", False))
+        # 既存コマンド（キー欠損）はOFF扱い＝従来通りウィンドウを残す
+        auto_close = bool(cmd_data.get("auto_close", False))
         if cmd_data.get("parallel", False):
             blocks = split_blocks(final_command)
             if len(blocks) > 1:
                 for block in blocks:
-                    run_in_shell(block, cmd_data["shell"], cwd=workdir, background=background)
+                    run_in_shell(block, cmd_data["shell"], cwd=workdir, background=background,
+                                 auto_close=auto_close)
                 return
-        run_in_shell(final_command, cmd_data["shell"], cwd=workdir, background=background)
+        run_in_shell(final_command, cmd_data["shell"], cwd=workdir, background=background,
+                     auto_close=auto_close)
 
     root.after(0, _run)
 
@@ -229,7 +261,7 @@ def ask_arguments(cmd_data, placeholders):
 def open_register_dialog(edit_data=None):
     dialog = tk.Toplevel(root)
     dialog.title("コマンド編集" if edit_data else "新規コマンド登録")
-    dialog.geometry("560x660")
+    dialog.geometry("560x690")
     dialog.grab_set()
 
     tk.Label(dialog, text="メニュー名:").pack(anchor="w", padx=12, pady=(12, 0))
@@ -288,11 +320,14 @@ def open_register_dialog(edit_data=None):
 
     parallel_var = tk.BooleanVar(value=False)
     background_var = tk.BooleanVar(value=False)
+    auto_close_var = tk.BooleanVar(value=True)
     run_at_startup_var = tk.BooleanVar(value=False)
     tk.Checkbutton(opts_frame, text="「---」のみの行で分割し、別ウィンドウで並列起動する",
                    variable=parallel_var).pack(anchor="w", padx=6, pady=(4, 0))
     tk.Checkbutton(opts_frame, text="ウィンドウを表示せずバックグラウンドで実行する",
                    variable=background_var).pack(anchor="w", padx=6)
+    tk.Checkbutton(opts_frame, text="実行後にウィンドウを閉じる",
+                   variable=auto_close_var).pack(anchor="w", padx=6)
     tk.Checkbutton(opts_frame, text="起動時に実行する",
                    variable=run_at_startup_var).pack(anchor="w", padx=6)
     tk.Label(opts_frame, text="例: 1ブロック目に npm run obsidian-bridge ／ 2ブロック目に n8n start を書き、間に --- の行を挟む",
@@ -310,6 +345,7 @@ def open_register_dialog(edit_data=None):
             cwd_entry.insert(0, edit_data["cwd"])
         parallel_var.set(bool(edit_data.get("parallel", False)))
         background_var.set(bool(edit_data.get("background", False)))
+        auto_close_var.set(bool(edit_data.get("auto_close", False)))
         run_at_startup_var.set(bool(edit_data.get("run_at_startup", False)))
 
     def on_save():
@@ -323,6 +359,7 @@ def open_register_dialog(edit_data=None):
         cwd_value = cwd_entry.get().strip()
         parallel_value = bool(parallel_var.get())
         background_value = bool(background_var.get())
+        auto_close_value = bool(auto_close_var.get())
         run_at_startup_value = bool(run_at_startup_var.get())
         commands = load_commands()
 
@@ -331,6 +368,7 @@ def open_register_dialog(edit_data=None):
                 if c["id"] == edit_data["id"]:
                     c.update({"name": name, "command": cmd, "shell": shell_var.get(), "args": args,
                               "cwd": cwd_value, "parallel": parallel_value, "background": background_value,
+                              "auto_close": auto_close_value,
                               "run_at_startup": run_at_startup_value})
                     break
         else:
@@ -344,6 +382,7 @@ def open_register_dialog(edit_data=None):
                     "cwd": cwd_value,
                     "parallel": parallel_value,
                     "background": background_value,
+                    "auto_close": auto_close_value,
                     "run_at_startup": run_at_startup_value,
                 }
             )
@@ -375,15 +414,23 @@ def open_manage_dialog():
     listbox.pack(padx=12, pady=10, fill="both", expand=True)
 
     commands = load_commands()
+
+    def build_marker(c):
+        """管理一覧用のマーカーを組み立てる。OFF（残す）のみ [残] を付ける。"""
+        marker = ""
+        if c.get("run_at_startup", False):
+            marker += " ★"
+        if not c.get("auto_close", False):
+            marker += " [残]"
+        return marker
+
     for c in commands:
-        marker = " ★" if c.get("run_at_startup", False) else ""
-        listbox.insert("end", f"{c['name']}  [{c['shell']}]" + marker)
+        listbox.insert("end", f"{c['name']}  [{c['shell']}]" + build_marker(c))
 
     def refresh_list(select=None):
         listbox.delete(0, "end")
         for c in commands:
-            marker = " ★" if c.get("run_at_startup", False) else ""
-            listbox.insert("end", f"{c['name']}  [{c['shell']}]" + marker)
+            listbox.insert("end", f"{c['name']}  [{c['shell']}]" + build_marker(c))
         if select is not None:
             listbox.selection_set(select)
             listbox.see(select)
